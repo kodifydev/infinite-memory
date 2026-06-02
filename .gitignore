@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+*.sqlite
+*.sqlite-*
+.pytest_cache/
+.ruff_cache/
+dist/
+*.egg-info/
+.env
+memory.toml
+sample-memory/
