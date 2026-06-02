@@ -1,0 +1,27 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "infinite-memory"
+version = "0.1.0"
+description = "Index Markdown folders with configurable OpenAI/Azure embeddings and search snippets with file + line references."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Kodify" }]
+dependencies = ["watchdog>=4.0.0"]
+
+[project.scripts]
+infinite-memory = "infinite_memory.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8.0", "ruff>=0.8.0"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
