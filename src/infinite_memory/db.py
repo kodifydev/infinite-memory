@@ -193,7 +193,12 @@ class MemoryDB:
             return {}
         scores: dict[int, float] = {}
         for row in rows:
-            scores[int(row["rowid"])] = 1.0 / (1.0 + abs(float(row["rank"])))
+            # SQLite FTS5 bm25() returns lower values for better matches. With the
+            # default rank function, matching rows are usually negative, so flip
+            # the sign before normalization; using abs() accidentally made the
+            # strongest lexical hits look weaker than broad/generic matches.
+            rank = float(row["rank"])
+            scores[int(row["rowid"])] = max(0.0, -rank)
         return scores
 
 
