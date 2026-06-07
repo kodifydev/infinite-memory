@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from pathlib import Path
+import json
 import os
+from pathlib import Path
 import tomllib
 from typing import Any
 
+APP_NAME = "infinite-memory"
+CONFIG_ENV_VAR = "INFINITE_MEMORY_CONFIG"
 DEFAULT_CONFIG_PATH = Path("~/.config/infinite-memory/config.toml")
 DEFAULT_DB_PATH = Path("~/.local/share/infinite-memory/index.sqlite")
 
@@ -14,12 +17,36 @@ def expand_path(value: str | Path) -> Path:
     return Path(os.path.expandvars(str(value))).expanduser().resolve()
 
 
+def _xdg_path(env_var: str, fallback_home_relative: str, *parts: str) -> Path:
+    root = os.getenv(env_var)
+    if root:
+        return expand_path(Path(root).joinpath(*parts))
+    return expand_path(Path(fallback_home_relative).joinpath(*parts))
+
+
+def default_config_path() -> Path:
+    return _xdg_path("XDG_CONFIG_HOME", "~/.config", APP_NAME, "config.toml")
+
+
+def default_db_path() -> Path:
+    return _xdg_path("XDG_DATA_HOME", "~/.local/share", APP_NAME, "index.sqlite")
+
+
+def resolve_config_path(path: str | Path | None = None) -> Path:
+    if path:
+        return expand_path(path)
+    env_path = os.getenv(CONFIG_ENV_VAR)
+    if env_path:
+        return expand_path(env_path)
+    return default_config_path()
+
+
 @dataclass(frozen=True)
 class WatchConfig:
     paths: list[Path] = field(default_factory=list)
     include_globs: list[str] = field(default_factory=lambda: ["**/*.md"])
     exclude_dirs: list[str] = field(default_factory=lambda: [".git", "node_modules", ".venv", "venv"])
-    db_path: Path = field(default_factory=lambda: expand_path(DEFAULT_DB_PATH))
+    db_path: Path = field(default_factory=default_db_path)
     poll_interval_seconds: float = 2.0
 
 
@@ -70,10 +97,17 @@ def _as_list(value: Any, default: list[str]) -> list[str]:
     return [str(item) for item in value]
 
 
-def load_config(path: str | Path | None) -> Config:
-    config_path = expand_path(path or DEFAULT_CONFIG_PATH)
+def load_config(path: str | Path | None = None) -> Config:
+    config_path = resolve_config_path(path)
     if not config_path.exists():
-        raise FileNotFoundError(f"Config file not found: {config_path}")
+        raise FileNotFoundError(
+            "Config file not found: "
+            f"{config_path}\n"
+            "Run:\n"
+            "  infinite-memory init --path ~/your-markdown-folder\n"
+            "Or pass one explicitly:\n"
+            "  infinite-memory --config ./memory.toml search \"your query\""
+        )
 
     raw = tomllib.loads(config_path.read_text(encoding="utf-8"))
     watch_raw = raw.get("watch", {})
@@ -89,7 +123,7 @@ def load_config(path: str | Path | None) -> Config:
         paths=paths,
         include_globs=_as_list(watch_raw.get("include_globs"), ["**/*.md"]),
         exclude_dirs=_as_list(watch_raw.get("exclude_dirs"), [".git", "node_modules", ".venv", "venv"]),
-        db_path=expand_path(watch_raw.get("db_path", DEFAULT_DB_PATH)),
+        db_path=expand_path(watch_raw.get("db_path", default_db_path())),
         poll_interval_seconds=float(watch_raw.get("poll_interval_seconds", 2.0)),
     )
     chunking = ChunkingConfig(
@@ -123,28 +157,56 @@ def load_config(path: str | Path | None) -> Config:
     return Config(watch=watch, chunking=chunking, embedding=embedding, search=search)
 
 
-def default_config_text(path: str | Path) -> str:
-    note_path = str(Path(path).expanduser())
-    return "".join([
-        "[watch]\n",
-        f"paths = [\"{note_path}\"]\n",
-        "db_path = \"~/.local/share/infinite-memory/index.sqlite\"\n",
-        "include_globs = [\"**/*.md\"]\n",
-        "exclude_dirs = [\".git\", \"node_modules\", \".venv\", \"venv\"]\n",
-        "poll_interval_seconds = 2\n\n",
-        "[chunking]\n",
-        "max_lines = 24\n",
-        "overlap_lines = 4\n",
-        "min_chars = 20\n\n",
-        "[embedding]\n",
-        "# Use \"azure_openai\", \"openai\", or \"hash\" for offline tests.\n",
-        "provider = \"azure_openai\"\n",
-        "model = \"text-embedding-3-large\"\n",
-        "batch_size = 32\n",
-        "# deployment = \"text-embedding-3-large\"\n",
-        "# api_version = \"2024-02-01\"\n\n",
-        "[search]\n",
-        "vector_weight = 0.75\n",
-        "lexical_weight = 0.25\n",
-        "min_score = 0.0\n",
-    ])
+def _toml_string(value: str | Path) -> str:
+    return json.dumps(str(value), ensure_ascii=False)
+
+
+def default_config_text(
+    path: str | Path,
+    *,
+    db_path: str | Path | None = None,
+    provider: str = "azure_openai",
+    model: str = "text-embedding-3-large",
+    deployment: str | None = None,
+    api_version: str | None = None,
+) -> str:
+    note_path = Path(path).expanduser()
+    database_path = db_path or default_db_path()
+    lines = [
+        "[watch]",
+        f"paths = [{_toml_string(note_path)}]",
+        f"db_path = {_toml_string(database_path)}",
+        'include_globs = ["**/*.md"]',
+        'exclude_dirs = [".git", "node_modules", ".venv", "venv"]',
+        "poll_interval_seconds = 2",
+        "",
+        "[chunking]",
+        "max_lines = 24",
+        "overlap_lines = 4",
+        "min_chars = 20",
+        "",
+        "[embedding]",
+        '# Use "azure_openai", "openai", or "hash" for offline tests.',
+        f"provider = {_toml_string(provider)}",
+        f"model = {_toml_string(model)}",
+        "batch_size = 32",
+    ]
+    if deployment:
+        lines.append(f"deployment = {_toml_string(deployment)}")
+    else:
+        lines.append(f"# deployment = {_toml_string(model)}")
+    if api_version:
+        lines.append(f"api_version = {_toml_string(api_version)}")
+    else:
+        lines.append('# api_version = "2024-02-01"')
+    lines.extend(
+        [
+            "",
+            "[search]",
+            "vector_weight = 0.75",
+            "lexical_weight = 0.25",
+            "min_score = 0.0",
+            "",
+        ]
+    )
+    return "\n".join(lines)

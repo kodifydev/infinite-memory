@@ -2,36 +2,125 @@
 
 `infinite-memory` indexes Markdown folders into a local SQLite database and lets you search them semantically, returning the text snippet plus the source file and line range — the same shape OpenClaw's `memory_search` exposes.
 
-It currently supports:
+It supports:
 
 - Linux-first file watching for `*.md` changes (`watchdog`/inotify, polling fallback).
 - OpenAI embeddings.
 - Azure OpenAI embeddings.
 - Deterministic local hash embeddings for tests/offline smoke checks.
 - SQLite storage with vector cosine ranking + FTS5 lexical fallback/boost.
+- XDG config/data paths, so day-to-day use does not need `uv run` or `--config`.
 
-## Install locally
+## Install on Linux
+
+Recommended user-facing install:
 
 ```bash
-uv sync --dev
-uv run infinite-memory --help
+curl -fsSL https://raw.githubusercontent.com/kodifydev/infinite-memory/main/install.sh | bash
 ```
 
-Or, from another project:
+The installer:
+
+- requires Python 3.11+
+- creates a dedicated virtualenv at `~/.local/share/infinite-memory/venv`
+- installs the package from GitHub
+- symlinks the command to `~/.local/bin/infinite-memory`
+
+If `~/.local/bin` is not on your `PATH`, add this to your shell profile:
 
 ```bash
-pip install -e /path/to/infinite-memory
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+Advanced alternatives:
+
+```bash
+pipx install git+https://github.com/kodifydev/infinite-memory.git
+# or, for developers with uv:
+uv tool install git+https://github.com/kodifydev/infinite-memory.git
 ```
 
 ## Quick start
 
-Create a config:
+Create the default config:
 
 ```bash
-uv run infinite-memory init --config ./memory.toml --path ~/my-md-notes
+infinite-memory init --path ~/memories
 ```
 
-Edit the embedding provider in `memory.toml`.
+That writes:
+
+```text
+~/.config/infinite-memory/config.toml
+```
+
+or, if set:
+
+```text
+$XDG_CONFIG_HOME/infinite-memory/config.toml
+```
+
+Index and search:
+
+```bash
+infinite-memory index --force
+infinite-memory search "shipping label bug" --max-results 5 --json
+```
+
+Watch for Markdown changes and auto-index them:
+
+```bash
+infinite-memory watch
+```
+
+## Config resolution
+
+For `index`, `search`, `status`, and `watch`, `--config` is optional.
+
+Resolution order:
+
+1. explicit CLI path:
+
+   ```bash
+   infinite-memory --config ./memory.toml search "shipping label bug"
+   # also supported for compatibility:
+   infinite-memory search --config ./memory.toml "shipping label bug"
+   ```
+
+2. environment variable:
+
+   ```bash
+   export INFINITE_MEMORY_CONFIG=./memory.toml
+   infinite-memory search "shipping label bug"
+   ```
+
+3. default XDG path:
+
+   ```text
+   $XDG_CONFIG_HOME/infinite-memory/config.toml
+   ~/.config/infinite-memory/config.toml
+   ```
+
+The database defaults to:
+
+```text
+$XDG_DATA_HOME/infinite-memory/index.sqlite
+~/.local/share/infinite-memory/index.sqlite
+```
+
+## Configure embeddings
+
+`init` can write the common embedding settings directly:
+
+```bash
+infinite-memory init \
+  --path ~/memories \
+  --provider azure_openai \
+  --model text-embedding-3-small \
+  --deployment text-embedding-3-small
+```
+
+Secrets are intentionally read only from environment variables, never from config files.
 
 For Azure OpenAI:
 
@@ -39,7 +128,6 @@ For Azure OpenAI:
 [embedding]
 provider = "azure_openai"
 model = "text-embedding-3-large"
-# Optional; if omitted the CLI reads the environment variables below.
 deployment = "text-embedding-3-large"
 api_version = "2024-02-01"
 ```
@@ -68,17 +156,25 @@ Required env var:
 export OPENAI_API_KEY="..."
 ```
 
-Index and search:
+For offline/dev smoke checks:
 
 ```bash
-uv run infinite-memory index --config ./memory.toml --force
-uv run infinite-memory search --config ./memory.toml "shipping label bug" --max-results 5 --json
+infinite-memory init --path ./notes --provider hash --model hash --force
 ```
 
-Watch for Markdown changes and auto-index them:
+## Local development
 
 ```bash
-uv run infinite-memory watch --config ./memory.toml
+uv sync --dev
+uv run pytest
+uv run ruff check .
+uv run infinite-memory --help
+```
+
+Editable install from a checkout:
+
+```bash
+pip install -e /path/to/infinite-memory
 ```
 
 ## Result shape
@@ -102,8 +198,16 @@ uv run infinite-memory watch --config ./memory.toml
 }
 ```
 
-## Notes
+## Uninstall
 
-- The database defaults to `~/.local/share/infinite-memory/index.sqlite`.
-- Secrets are intentionally read only from environment variables, never from config files.
-- If embeddings are unavailable, use `provider = "hash"` for offline dev/testing; production should use `openai` or `azure_openai`.
+If installed with `install.sh`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/kodifydev/infinite-memory/main/uninstall.sh | bash
+```
+
+To also remove config and index data:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/kodifydev/infinite-memory/main/uninstall.sh | bash -s -- --purge
+```
