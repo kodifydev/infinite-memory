@@ -8,7 +8,8 @@ It supports:
 - OpenAI embeddings.
 - Azure OpenAI embeddings.
 - Deterministic local hash embeddings for tests/offline smoke checks.
-- SQLite storage with vector cosine ranking + FTS5 lexical fallback/boost.
+- SQLite storage with OpenClaw-aligned hybrid vector + FTS5 ranking.
+- Optional `sqlite-vec` vector index, with Python cosine fallback when the extension is unavailable.
 - XDG config/data paths, so day-to-day use does not need `uv run` or `--config`.
 
 ## Install on Linux
@@ -107,6 +108,22 @@ The database defaults to:
 $XDG_DATA_HOME/infinite-memory/index.sqlite
 ~/.local/share/infinite-memory/index.sqlite
 ```
+
+Search defaults are intentionally aligned with OpenClaw's built-in memory search:
+
+```toml
+[chunking]
+tokens = 400
+overlap = 80
+
+[search]
+vector_weight = 0.7
+lexical_weight = 0.3
+min_score = 0.35
+candidate_multiplier = 4
+```
+
+Lexical search uses FTS5 with `AND` between query terms, then merges keyword and vector candidates before applying the hybrid score.
 
 ## Configure embeddings
 
