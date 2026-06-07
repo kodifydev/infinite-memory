@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import hashlib
+import json
 
 from .chunking import chunk_markdown
 from .config import Config
@@ -20,10 +21,29 @@ class IndexStats:
 
 
 class MemoryIndexer:
+    INDEX_SIGNATURE_KEY = "index_signature_v1"
+
     def __init__(self, config: Config, db: MemoryDB, embedder: EmbeddingProvider):
         self.config = config
         self.db = db
         self.embedder = embedder
+
+    def index_signature(self) -> str:
+        return json.dumps(
+            {
+                "chunking": {
+                    "tokens": self.config.chunking.tokens,
+                    "overlap": self.config.chunking.overlap,
+                },
+                "embedding": {
+                    "provider": self.config.embedding.provider,
+                    "model": self.config.embedding.model,
+                    "dimension": self.config.embedding.dimension,
+                },
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
 
     def iter_markdown_files(self) -> list[Path]:
         files: set[Path] = set()
@@ -45,16 +65,19 @@ class MemoryIndexer:
 
     def index_all(self, *, force: bool = False) -> IndexStats:
         scanned = indexed = skipped = chunks = 0
+        signature = self.index_signature()
+        effective_force = force or self.db.get_meta(self.INDEX_SIGNATURE_KEY) != signature
         paths = self.iter_markdown_files()
         for path in paths:
             scanned += 1
-            did_index, chunk_count = self.index_file(path, force=force)
+            did_index, chunk_count = self.index_file(path, force=effective_force)
             if did_index:
                 indexed += 1
                 chunks += chunk_count
             else:
                 skipped += 1
         removed = self.db.prune_missing({str(p) for p in paths})
+        self.db.set_meta(self.INDEX_SIGNATURE_KEY, signature)
         return IndexStats(scanned=scanned, indexed=indexed, skipped=skipped, removed=removed, chunks=chunks)
 
     def index_file(self, path: Path, *, force: bool = False) -> tuple[bool, int]:
@@ -106,4 +129,5 @@ class MemoryIndexer:
             vector_weight=self.config.search.vector_weight,
             lexical_weight=self.config.search.lexical_weight,
             min_score=self.config.search.min_score if min_score is None else min_score,
+            candidate_multiplier=self.config.search.candidate_multiplier,
         )
