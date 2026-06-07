@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from infinite_memory.config import load_config
+from infinite_memory.config import default_config_path, load_config, resolve_config_path
 from infinite_memory.db import MemoryDB
 from infinite_memory.embeddings import build_embedding_provider
 from infinite_memory.indexer import MemoryIndexer
@@ -102,3 +102,51 @@ def test_cli_index_and_search_json(tmp_path: Path, capsys) -> None:
     assert payload["success"] is True
     assert payload["results"][0]["path"].endswith("memory.md")
     assert "startLine" in payload["results"][0]
+
+
+def test_cli_uses_global_config_option_before_subcommand(tmp_path: Path, capsys) -> None:
+    notes = tmp_path / "notes"
+    notes.mkdir()
+    (notes / "memory.md").write_text("# Search\n\nGlobal config option works.\n", encoding="utf-8")
+    cfg = write_config(tmp_path, notes)
+
+    assert main(["--config", str(cfg), "index", "--force"]) == 0
+    assert main(["--config", str(cfg), "search", "Global config", "--json"]) == 0
+    output = capsys.readouterr().out.strip().splitlines()
+    payload = json.loads("\n".join(output[1:]))
+    assert payload["success"] is True
+    assert payload["results"][0]["path"].endswith("memory.md")
+
+
+def test_config_resolution_prefers_env_then_xdg(tmp_path: Path, monkeypatch) -> None:
+    explicit_cfg = tmp_path / "explicit.toml"
+    env_cfg = tmp_path / "env.toml"
+    xdg_home = tmp_path / "xdg-config"
+    monkeypatch.setenv("INFINITE_MEMORY_CONFIG", str(env_cfg))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg_home))
+
+    assert resolve_config_path(explicit_cfg) == explicit_cfg.resolve()
+    assert resolve_config_path() == env_cfg.resolve()
+
+    monkeypatch.delenv("INFINITE_MEMORY_CONFIG")
+    assert default_config_path() == xdg_home / "infinite-memory" / "config.toml"
+    assert resolve_config_path() == xdg_home / "infinite-memory" / "config.toml"
+
+
+def test_cli_init_writes_default_xdg_config(tmp_path: Path, monkeypatch, capsys) -> None:
+    xdg_config = tmp_path / "config-home"
+    xdg_data = tmp_path / "data-home"
+    notes = tmp_path / "notes"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg_config))
+    monkeypatch.setenv("XDG_DATA_HOME", str(xdg_data))
+    monkeypatch.delenv("INFINITE_MEMORY_CONFIG", raising=False)
+
+    assert main(["init", "--path", str(notes), "--provider", "hash", "--model", "hash"]) == 0
+    capsys.readouterr()
+    cfg = xdg_config / "infinite-memory" / "config.toml"
+    assert cfg.exists()
+    config = load_config()
+    assert config.watch.paths == [notes.resolve()]
+    assert config.watch.db_path == xdg_data / "infinite-memory" / "index.sqlite"
+    assert config.embedding.provider == "hash"
+    assert config.embedding.model == "hash"
