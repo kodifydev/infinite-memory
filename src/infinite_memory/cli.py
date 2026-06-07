@@ -97,6 +97,18 @@ def cmd_status(args: argparse.Namespace) -> int:
                     "paths": [str(p) for p in config.watch.paths],
                     "embedding_provider": config.embedding.provider,
                     "embedding_model": config.embedding.model,
+                    "vector_backend": db.vector_backend,
+                    "vector_rows": db.count_vector_rows(),
+                    "chunking": {
+                        "tokens": config.chunking.tokens,
+                        "overlap": config.chunking.overlap,
+                    },
+                    "search": {
+                        "vector_weight": config.search.vector_weight,
+                        "lexical_weight": config.search.lexical_weight,
+                        "min_score": config.search.min_score,
+                        "candidate_multiplier": config.search.candidate_multiplier,
+                    },
                 },
                 ensure_ascii=False,
                 indent=2,

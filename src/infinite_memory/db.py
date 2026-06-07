@@ -4,8 +4,13 @@ from dataclasses import dataclass
 from pathlib import Path
 import json
 import math
+import re
 import sqlite3
 import time
+from typing import Any
+
+FTS_QUERY_TOKEN_RE = re.compile(r"\w+", re.UNICODE)
+VECTOR_CANDIDATE_LIMIT = 200
 
 
 @dataclass(frozen=True)
@@ -18,6 +23,13 @@ class SearchHit:
     source: str = "memory"
 
 
+@dataclass
+class _Candidate:
+    row: sqlite3.Row
+    vector_score: float = 0.0
+    lexical_score: float = 0.0
+
+
 class MemoryDB:
     def __init__(self, path: Path):
         self.path = path
@@ -26,14 +38,25 @@ class MemoryDB:
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
+        self._sqlite_vec: Any | None = None
+        self._vector_dim: int | None = None
         self._ensure_schema()
+        self._load_sqlite_vec()
 
     def close(self) -> None:
         self.conn.close()
 
+    @property
+    def vector_backend(self) -> str:
+        return "sqlite-vec" if self._sqlite_vec is not None else "python"
+
     def _ensure_schema(self) -> None:
         self.conn.executescript(
             """
+            CREATE TABLE IF NOT EXISTS meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS files (
                 path TEXT PRIMARY KEY,
                 mtime_ns INTEGER NOT NULL,
@@ -64,6 +87,58 @@ class MemoryDB:
         )
         self.conn.commit()
 
+    def _load_sqlite_vec(self) -> None:
+        try:
+            import sqlite_vec
+
+            self.conn.enable_load_extension(True)
+            sqlite_vec.load(self.conn)
+            self.conn.enable_load_extension(False)
+            self._sqlite_vec = sqlite_vec
+            stored_dim = self.conn.execute(
+                "SELECT value FROM meta WHERE key = 'vector_dim'"
+            ).fetchone()
+            if stored_dim:
+                self._vector_dim = int(stored_dim["value"])
+        except Exception:
+            try:
+                self.conn.enable_load_extension(False)
+            except Exception:
+                pass
+            self._sqlite_vec = None
+            self._vector_dim = None
+
+    def _ensure_vector_table(self, dimension: int) -> bool:
+        if self._sqlite_vec is None or dimension <= 0:
+            return False
+        if self._vector_dim is not None and self._vector_dim != dimension:
+            self.conn.execute("DROP TABLE IF EXISTS chunks_vec")
+            self.conn.execute("DELETE FROM meta WHERE key = 'vector_dim'")
+            self._vector_dim = None
+        self.conn.execute(
+            f"CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec USING vec0(embedding float[{dimension}])"
+        )
+        if self._vector_dim != dimension:
+            self.conn.execute(
+                "INSERT INTO meta(key, value) VALUES ('vector_dim', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (str(dimension),),
+            )
+            self._vector_dim = dimension
+        return True
+
+    def get_meta(self, key: str) -> str | None:
+        row = self.conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+        return str(row["value"]) if row else None
+
+    def set_meta(self, key: str, value: str) -> None:
+        self.conn.execute(
+            "INSERT INTO meta(key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, value),
+        )
+        self.conn.commit()
+
     def indexed_file(self, path: Path) -> sqlite3.Row | None:
         return self.conn.execute("SELECT * FROM files WHERE path = ?", (str(path),)).fetchone()
 
@@ -78,6 +153,7 @@ class MemoryDB:
     ) -> None:
         now = time.time()
         path_str = str(path)
+        vector_ready = self._ensure_vector_table(len(chunks[0][4])) if chunks and chunks[0][4] else False
         with self.conn:
             self.remove_path(path)
             self.conn.execute(
@@ -117,12 +193,22 @@ class MemoryDB:
                     "INSERT INTO chunks_fts(rowid, text, path) VALUES (?, ?, ?)",
                     (rowid, text, path_str),
                 )
+                if vector_ready and embedding:
+                    self.conn.execute(
+                        "INSERT INTO chunks_vec(rowid, embedding) VALUES (?, ?)",
+                        (rowid, self._sqlite_vec.serialize_float32(embedding)),
+                    )
 
     def remove_path(self, path: Path | str) -> None:
         path_str = str(path)
         ids = [row[0] for row in self.conn.execute("SELECT id FROM chunks WHERE path = ?", (path_str,))]
         for rowid in ids:
             self.conn.execute("DELETE FROM chunks_fts WHERE rowid = ?", (rowid,))
+            if self._sqlite_vec is not None:
+                try:
+                    self.conn.execute("DELETE FROM chunks_vec WHERE rowid = ?", (rowid,))
+                except sqlite3.OperationalError:
+                    pass
         self.conn.execute("DELETE FROM chunks WHERE path = ?", (path_str,))
         self.conn.execute("DELETE FROM files WHERE path = ?", (path_str,))
 
@@ -142,6 +228,14 @@ class MemoryDB:
     def count_chunks(self) -> int:
         return int(self.conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0])
 
+    def count_vector_rows(self) -> int:
+        if self._sqlite_vec is None:
+            return 0
+        try:
+            return int(self.conn.execute("SELECT COUNT(*) FROM chunks_vec").fetchone()[0])
+        except sqlite3.OperationalError:
+            return 0
+
     def search(
         self,
         query_embedding: list[float],
@@ -151,23 +245,44 @@ class MemoryDB:
         vector_weight: float,
         lexical_weight: float,
         min_score: float,
+        candidate_multiplier: int,
     ) -> list[SearchHit]:
-        rows = self.conn.execute(
-            "SELECT id, path, start_line, end_line, text, embedding FROM chunks"
-        ).fetchall()
-        lexical_scores = self._lexical_scores(query_text)
-        best_lexical = max(lexical_scores.values(), default=0.0) or 1.0
+        candidate_limit = min(
+            VECTOR_CANDIDATE_LIMIT,
+            max(1, math.floor(max_results * max(1, candidate_multiplier))),
+        )
+        candidates: dict[int, _Candidate] = {}
 
-        hits: list[tuple[float, sqlite3.Row]] = []
-        for row in rows:
-            embedding = json.loads(row["embedding"])
-            vector_score = _cosine(query_embedding, embedding)
-            lexical_score = lexical_scores.get(int(row["id"]), 0.0) / best_lexical
-            score = vector_weight * vector_score + lexical_weight * lexical_score
-            if score >= min_score:
-                hits.append((score, row))
+        for row, score in self._vector_candidates(query_embedding, candidate_limit):
+            rowid = int(row["id"])
+            candidates[rowid] = _Candidate(row=row, vector_score=score)
 
-        hits.sort(key=lambda item: item[0], reverse=True)
+        keyword_ids: set[int] = set()
+        for row, score in self._keyword_candidates(query_text, candidate_limit):
+            rowid = int(row["id"])
+            keyword_ids.add(rowid)
+            candidate = candidates.get(rowid)
+            if candidate:
+                candidate.lexical_score = score
+                candidate.row = row
+            else:
+                candidates[rowid] = _Candidate(row=row, lexical_score=score)
+
+        ranked: list[tuple[float, int, sqlite3.Row]] = []
+        for rowid, candidate in candidates.items():
+            score = vector_weight * candidate.vector_score + lexical_weight * candidate.lexical_score
+            ranked.append((score, rowid, candidate.row))
+        ranked.sort(key=lambda item: item[0], reverse=True)
+
+        strict = [entry for entry in ranked if entry[0] >= min_score]
+        if strict or not keyword_ids:
+            selected = strict[:max_results]
+        else:
+            relaxed_min_score = min(min_score, lexical_weight)
+            selected = [
+                entry for entry in ranked if entry[1] in keyword_ids and entry[0] >= relaxed_min_score
+            ][:max_results]
+
         return [
             SearchHit(
                 path=row["path"],
@@ -176,30 +291,83 @@ class MemoryDB:
                 score=round(float(score), 6),
                 snippet=row["text"],
             )
-            for score, row in hits[:max_results]
+            for score, _rowid, row in selected
         ]
 
-    def _lexical_scores(self, query_text: str) -> dict[int, float]:
-        terms = [t for t in query_text.replace('"', " ").split() if t.strip()]
-        if not terms:
-            return {}
-        fts_query = " OR ".join('"' + term.replace('"', '""') + '"' for term in terms[:12])
+    def _vector_candidates(
+        self, query_embedding: list[float], limit: int
+    ) -> list[tuple[sqlite3.Row, float]]:
+        if not query_embedding or limit <= 0:
+            return []
+        if self._sqlite_vec is not None and self._vector_dim == len(query_embedding):
+            try:
+                rows = self.conn.execute(
+                    """
+                    SELECT c.id, c.path, c.start_line, c.end_line, c.text,
+                           vec_distance_cosine(v.embedding, ?) AS dist
+                      FROM chunks_vec v
+                      JOIN chunks c ON c.id = v.rowid
+                     ORDER BY dist ASC
+                     LIMIT ?
+                    """,
+                    (self._sqlite_vec.serialize_float32(query_embedding), limit),
+                ).fetchall()
+                return [(row, max(0.0, min(1.0, 1.0 - float(row["dist"])))) for row in rows]
+            except sqlite3.Error:
+                pass
+
+        rows = self.conn.execute(
+            "SELECT id, path, start_line, end_line, text, embedding FROM chunks"
+        ).fetchall()
+        scored: list[tuple[sqlite3.Row, float]] = []
+        for row in rows:
+            embedding = json.loads(row["embedding"])
+            score = _cosine(query_embedding, embedding)
+            if _number_is_finite(score):
+                scored.append((row, score))
+        scored.sort(key=lambda item: item[1], reverse=True)
+        return scored[:limit]
+
+    def _keyword_candidates(self, query_text: str, limit: int) -> list[tuple[sqlite3.Row, float]]:
+        fts_query = _build_fts_query(query_text)
+        if not fts_query or limit <= 0:
+            return []
         try:
             rows = self.conn.execute(
-                "SELECT rowid, bm25(chunks_fts) AS rank FROM chunks_fts WHERE chunks_fts MATCH ?",
-                (fts_query,),
+                """
+                SELECT c.id, c.path, c.start_line, c.end_line, c.text,
+                       bm25(chunks_fts) AS rank
+                  FROM chunks_fts
+                  JOIN chunks c ON c.id = chunks_fts.rowid
+                 WHERE chunks_fts MATCH ?
+                 ORDER BY rank ASC
+                 LIMIT ?
+                """,
+                (fts_query, limit),
             ).fetchall()
         except sqlite3.OperationalError:
-            return {}
-        scores: dict[int, float] = {}
-        for row in rows:
-            # SQLite FTS5 bm25() returns lower values for better matches. With the
-            # default rank function, matching rows are usually negative, so flip
-            # the sign before normalization; using abs() accidentally made the
-            # strongest lexical hits look weaker than broad/generic matches.
-            rank = float(row["rank"])
-            scores[int(row["rowid"])] = max(0.0, -rank)
-        return scores
+            return []
+        return [(row, _bm25_rank_to_score(float(row["rank"]))) for row in rows]
+
+
+def _build_fts_query(raw: str) -> str | None:
+    tokens = [token.strip() for token in FTS_QUERY_TOKEN_RE.findall(raw) if token.strip()]
+    if not tokens:
+        return None
+    return " AND ".join(f'"{token.replace(chr(34), "")}"' for token in tokens)
+
+
+def _bm25_rank_to_score(rank: float) -> float:
+    if not math.isfinite(rank):
+        return 1 / 1000
+    if rank < 0:
+        relevance = -rank
+        return relevance / (1 + relevance)
+    return 1 / (1 + rank)
+
+
+def _number_is_finite(value: float) -> bool:
+    return math.isfinite(value)
 
 
 def _cosine(a: list[float], b: list[float]) -> float:

@@ -10,7 +10,10 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "Kodify" }]
-dependencies = ["watchdog>=4.0.0"]
+dependencies = [
+    "sqlite-vec>=0.1.9",
+    "watchdog>=4.0.0",
+]
 
 [project.scripts]
 infinite-memory = "infinite_memory.cli:main"

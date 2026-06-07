@@ -13,25 +13,28 @@ from infinite_memory.cli import main
 def write_config(tmp_path: Path, notes: Path) -> Path:
     cfg = tmp_path / "memory.toml"
     cfg.write_text(
-        "\n".join([
-            "[watch]",
-            f"paths = [\"{notes}\"]",
-            f"db_path = \"{tmp_path / 'index.sqlite'}\"",
-            "",
-            "[chunking]",
-            "max_lines = 4",
-            "overlap_lines = 1",
-            "min_chars = 5",
-            "",
-            "[embedding]",
-            "provider = \"hash\"",
-            "dimension = 128",
-            "batch_size = 2",
-            "",
-            "[search]",
-            "vector_weight = 0.8",
-            "lexical_weight = 0.2",
-        ]),
+        "\n".join(
+            [
+                "[watch]",
+                f"paths = [\"{notes}\"]",
+                f"db_path = \"{tmp_path / 'index.sqlite'}\"",
+                "",
+                "[chunking]",
+                "tokens = 80",
+                "overlap = 16",
+                "",
+                "[embedding]",
+                "provider = \"hash\"",
+                "dimension = 128",
+                "batch_size = 2",
+                "",
+                "[search]",
+                "vector_weight = 0.7",
+                "lexical_weight = 0.3",
+                "min_score = 0.0",
+                "candidate_multiplier = 4",
+            ]
+        ),
         encoding="utf-8",
     )
     return cfg
@@ -42,7 +45,8 @@ def test_indexes_markdown_and_searches_with_file_and_lines(tmp_path: Path) -> No
     notes.mkdir()
     incident = notes / "incident.md"
     incident.write_text(
-        "# Shipping labels\n\nSEUR pickup labels failed for mixed frozen boxes.\nThe workaround was to reprint warehouse stickers.\n",
+        "# Shipping labels\n\nSEUR pickup labels failed for mixed frozen boxes.\n"
+        "The workaround was to reprint warehouse stickers.\n",
         encoding="utf-8",
     )
     other = notes / "recipe.md"
@@ -56,6 +60,8 @@ def test_indexes_markdown_and_searches_with_file_and_lines(tmp_path: Path) -> No
         stats = indexer.index_all(force=True)
         assert stats.indexed == 2
         assert stats.chunks >= 2
+        if db.vector_backend == "sqlite-vec":
+            assert db.count_vector_rows() == db.count_chunks()
 
         hits = indexer.search("SEUR frozen warehouse labels", max_results=2)
         assert hits
@@ -150,9 +156,15 @@ def test_cli_init_writes_default_xdg_config(tmp_path: Path, monkeypatch, capsys)
     assert config.watch.db_path == xdg_data / "infinite-memory" / "index.sqlite"
     assert config.embedding.provider == "hash"
     assert config.embedding.model == "hash"
+    assert config.chunking.tokens == 400
+    assert config.chunking.overlap == 80
+    assert config.search.vector_weight == 0.7
+    assert config.search.lexical_weight == 0.3
+    assert config.search.min_score == 0.35
+    assert config.search.candidate_multiplier == 4
 
 
-def test_lexical_bm25_prefers_stronger_exact_matches(tmp_path: Path) -> None:
+def test_lexical_bm25_prefers_stronger_exact_matches_with_and_query(tmp_path: Path) -> None:
     db = MemoryDB(tmp_path / "index.sqlite")
     try:
         exact = tmp_path / "exact.md"
@@ -177,7 +189,15 @@ def test_lexical_bm25_prefers_stronger_exact_matches(tmp_path: Path) -> None:
             mtime_ns=1,
             size=1,
             content_hash="broad",
-            chunks=[(0, 1, 1, "obligatorio memory_search config", [1.0])],
+            chunks=[
+                (
+                    0,
+                    1,
+                    1,
+                    "Appstle always_invoice_customers fiscal_id obligatorio " + "noise " * 200,
+                    [1.0],
+                )
+            ],
         )
 
         hits = db.search(
@@ -187,7 +207,9 @@ def test_lexical_bm25_prefers_stronger_exact_matches(tmp_path: Path) -> None:
             vector_weight=0.0,
             lexical_weight=1.0,
             min_score=0.0,
+            candidate_multiplier=4,
         )
+        assert len(hits) == 2
         assert hits[0].path == str(exact)
         assert hits[0].score > hits[1].score
     finally:
