@@ -150,3 +150,45 @@ def test_cli_init_writes_default_xdg_config(tmp_path: Path, monkeypatch, capsys)
     assert config.watch.db_path == xdg_data / "infinite-memory" / "index.sqlite"
     assert config.embedding.provider == "hash"
     assert config.embedding.model == "hash"
+
+
+def test_lexical_bm25_prefers_stronger_exact_matches(tmp_path: Path) -> None:
+    db = MemoryDB(tmp_path / "index.sqlite")
+    try:
+        exact = tmp_path / "exact.md"
+        broad = tmp_path / "broad.md"
+        db.upsert_file(
+            path=exact,
+            mtime_ns=1,
+            size=1,
+            content_hash="exact",
+            chunks=[
+                (
+                    0,
+                    1,
+                    1,
+                    "Appstle always_invoice_customers fiscal_id obligatorio",
+                    [1.0],
+                )
+            ],
+        )
+        db.upsert_file(
+            path=broad,
+            mtime_ns=1,
+            size=1,
+            content_hash="broad",
+            chunks=[(0, 1, 1, "obligatorio memory_search config", [1.0])],
+        )
+
+        hits = db.search(
+            [],
+            "Appstle always_invoice_customers fiscal_id obligatorio",
+            max_results=2,
+            vector_weight=0.0,
+            lexical_weight=1.0,
+            min_score=0.0,
+        )
+        assert hits[0].path == str(exact)
+        assert hits[0].score > hits[1].score
+    finally:
+        db.close()
