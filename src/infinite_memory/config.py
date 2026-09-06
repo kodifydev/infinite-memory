@@ -52,9 +52,8 @@ class WatchConfig:
 
 @dataclass(frozen=True)
 class ChunkingConfig:
-    max_lines: int = 24
-    overlap_lines: int = 4
-    min_chars: int = 20
+    tokens: int = 400
+    overlap: int = 80
 
 
 @dataclass(frozen=True)
@@ -76,9 +75,10 @@ class EmbeddingConfig:
 
 @dataclass(frozen=True)
 class SearchConfig:
-    vector_weight: float = 0.75
-    lexical_weight: float = 0.25
-    min_score: float = 0.0
+    vector_weight: float = 0.7
+    lexical_weight: float = 0.3
+    min_score: float = 0.35
+    candidate_multiplier: int = 4
 
 
 @dataclass(frozen=True)
@@ -127,12 +127,11 @@ def load_config(path: str | Path | None = None) -> Config:
         poll_interval_seconds=float(watch_raw.get("poll_interval_seconds", 2.0)),
     )
     chunking = ChunkingConfig(
-        max_lines=int(chunk_raw.get("max_lines", 24)),
-        overlap_lines=int(chunk_raw.get("overlap_lines", 4)),
-        min_chars=int(chunk_raw.get("min_chars", 20)),
+        tokens=max(1, int(chunk_raw.get("tokens", 400))),
+        overlap=max(0, int(chunk_raw.get("overlap", 80))),
     )
-    if chunking.overlap_lines >= chunking.max_lines:
-        raise ValueError("chunking.overlap_lines must be lower than chunking.max_lines")
+    if chunking.overlap >= chunking.tokens:
+        raise ValueError("chunking.overlap must be lower than chunking.tokens")
 
     embedding = EmbeddingConfig(
         provider=str(embed_raw.get("provider", "azure_openai")),
@@ -146,13 +145,16 @@ def load_config(path: str | Path | None = None) -> Config:
         openai_api_key_env=str(embed_raw.get("openai_api_key_env", "OPENAI_API_KEY")),
         azure_endpoint_env=str(embed_raw.get("azure_endpoint_env", "AZURE_OPENAI_ENDPOINT")),
         azure_api_key_env=str(embed_raw.get("azure_api_key_env", "AZURE_OPENAI_API_KEY")),
-        azure_deployment_env=str(embed_raw.get("azure_deployment_env", "AZURE_OPENAI_EMBEDDING_DEPLOYMENT")),
+        azure_deployment_env=str(
+            embed_raw.get("azure_deployment_env", "AZURE_OPENAI_EMBEDDING_DEPLOYMENT")
+        ),
         azure_api_version_env=str(embed_raw.get("azure_api_version_env", "AZURE_OPENAI_API_VERSION")),
     )
     search = SearchConfig(
-        vector_weight=float(search_raw.get("vector_weight", 0.75)),
-        lexical_weight=float(search_raw.get("lexical_weight", 0.25)),
-        min_score=float(search_raw.get("min_score", 0.0)),
+        vector_weight=float(search_raw.get("vector_weight", 0.7)),
+        lexical_weight=float(search_raw.get("lexical_weight", 0.3)),
+        min_score=float(search_raw.get("min_score", 0.35)),
+        candidate_multiplier=max(1, int(search_raw.get("candidate_multiplier", 4))),
     )
     return Config(watch=watch, chunking=chunking, embedding=embedding, search=search)
 
@@ -181,9 +183,9 @@ def default_config_text(
         "poll_interval_seconds = 2",
         "",
         "[chunking]",
-        "max_lines = 24",
-        "overlap_lines = 4",
-        "min_chars = 20",
+        "# OpenClaw-aligned approximate-token chunking: chars ~= tokens * 4.",
+        "tokens = 400",
+        "overlap = 80",
         "",
         "[embedding]",
         '# Use "azure_openai", "openai", or "hash" for offline tests.',
@@ -203,9 +205,10 @@ def default_config_text(
         [
             "",
             "[search]",
-            "vector_weight = 0.75",
-            "lexical_weight = 0.25",
-            "min_score = 0.0",
+            "vector_weight = 0.7",
+            "lexical_weight = 0.3",
+            "min_score = 0.35",
+            "candidate_multiplier = 4",
             "",
         ]
     )
