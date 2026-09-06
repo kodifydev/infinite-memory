@@ -11,6 +11,7 @@ from typing import Any
 
 FTS_QUERY_TOKEN_RE = re.compile(r"\w+", re.UNICODE)
 VECTOR_CANDIDATE_LIMIT = 200
+VECTOR_DISTANCE_METRIC = "cosine"
 
 
 @dataclass(frozen=True)
@@ -100,6 +101,8 @@ class MemoryDB:
             ).fetchone()
             if stored_dim:
                 self._vector_dim = int(stored_dim["value"])
+                with self.conn:
+                    self._ensure_vector_table(self._vector_dim)
         except Exception:
             try:
                 self.conn.enable_load_extension(False)
@@ -111,12 +114,19 @@ class MemoryDB:
     def _ensure_vector_table(self, dimension: int) -> bool:
         if self._sqlite_vec is None or dimension <= 0:
             return False
-        if self._vector_dim is not None and self._vector_dim != dimension:
+        schema_row = self.conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'chunks_vec'"
+        ).fetchone()
+        schema_sql = str(schema_row["sql"] or "").lower().replace(" ", "") if schema_row else ""
+        uses_cosine = f"distance_metric={VECTOR_DISTANCE_METRIC}" in schema_sql
+        needs_rebuild = self._vector_dim != dimension or not uses_cosine
+        if needs_rebuild:
             self.conn.execute("DROP TABLE IF EXISTS chunks_vec")
             self.conn.execute("DELETE FROM meta WHERE key = 'vector_dim'")
             self._vector_dim = None
         self.conn.execute(
-            f"CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec USING vec0(embedding float[{dimension}])"
+            "CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec "
+            f"USING vec0(embedding float[{dimension}] distance_metric={VECTOR_DISTANCE_METRIC})"
         )
         if self._vector_dim != dimension:
             self.conn.execute(
@@ -125,6 +135,16 @@ class MemoryDB:
                 (str(dimension),),
             )
             self._vector_dim = dimension
+        if needs_rebuild:
+            rows = self.conn.execute(
+                "SELECT id, embedding FROM chunks WHERE embedding_dim = ?", (dimension,)
+            ).fetchall()
+            for row in rows:
+                embedding = json.loads(row["embedding"])
+                self.conn.execute(
+                    "INSERT INTO chunks_vec(rowid, embedding) VALUES (?, ?)",
+                    (int(row["id"]), self._sqlite_vec.serialize_float32(embedding)),
+                )
         return True
 
     def get_meta(self, key: str) -> str | None:
@@ -303,12 +323,17 @@ class MemoryDB:
             try:
                 rows = self.conn.execute(
                     """
+                    WITH nearest AS (
+                        SELECT rowid, distance
+                          FROM chunks_vec
+                         WHERE embedding MATCH ? AND k = ?
+                         ORDER BY distance ASC
+                    )
                     SELECT c.id, c.path, c.start_line, c.end_line, c.text,
-                           vec_distance_cosine(v.embedding, ?) AS dist
-                      FROM chunks_vec v
-                      JOIN chunks c ON c.id = v.rowid
-                     ORDER BY dist ASC
-                     LIMIT ?
+                           nearest.distance AS dist
+                      FROM nearest
+                      JOIN chunks c ON c.id = nearest.rowid
+                     ORDER BY nearest.distance ASC
                     """,
                     (self._sqlite_vec.serialize_float32(query_embedding), limit),
                 ).fetchall()
