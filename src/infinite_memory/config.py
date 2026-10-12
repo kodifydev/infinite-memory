@@ -50,10 +50,16 @@ class WatchConfig:
     poll_interval_seconds: float = 2.0
 
 
+CHUNKING_STRATEGIES = {"window", "markdown_blocks"}
+
+
 @dataclass(frozen=True)
 class ChunkingConfig:
     tokens: int = 400
     overlap: int = 80
+    # "window": fixed-size windows (OpenClaw-aligned). "markdown_blocks": one chunk per paragraph or
+    # list item, prefixed with "<title> — <section>" so each fact embeds on its own with its context.
+    strategy: str = "window"
 
 
 @dataclass(frozen=True)
@@ -129,7 +135,10 @@ def load_config(path: str | Path | None = None) -> Config:
     chunking = ChunkingConfig(
         tokens=max(1, int(chunk_raw.get("tokens", 400))),
         overlap=max(0, int(chunk_raw.get("overlap", 80))),
+        strategy=str(chunk_raw.get("strategy", "window")),
     )
+    if chunking.strategy not in CHUNKING_STRATEGIES:
+        raise ValueError(f"chunking.strategy must be one of {sorted(CHUNKING_STRATEGIES)}")
     if chunking.overlap >= chunking.tokens:
         raise ValueError("chunking.overlap must be lower than chunking.tokens")
 

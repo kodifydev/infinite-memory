@@ -34,6 +34,7 @@ class MemoryIndexer:
                 "chunking": {
                     "tokens": self.config.chunking.tokens,
                     "overlap": self.config.chunking.overlap,
+                    "strategy": self.config.chunking.strategy,
                 },
                 "embedding": {
                     "provider": self.config.embedding.provider,

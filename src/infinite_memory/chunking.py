@@ -101,5 +101,78 @@ def chunk_text(content: str, config: ChunkingConfig) -> list[Chunk]:
     return chunks
 
 
+FRONTMATTER_TITLE_RE = re.compile(r"^titulo:\s*(.+)$|^title:\s*(.+)$")
+LIST_ITEM_RE = re.compile(r"^([-*+]|\d+[.)])\s")
+MIN_BLOCK_CHARS = 16
+
+
+def chunk_markdown_blocks(content: str, config: ChunkingConfig, fallback_title: str = "") -> list[Chunk]:
+    """One chunk per paragraph or list item, prefixed with "<title> — <section>".
+
+    A fact embedded alone keeps its own meaning instead of being averaged with the rest of the page;
+    the prefix keeps who/what it is about. Blocks longer than the window size are split with
+    ``chunk_text`` and every piece gets the same prefix."""
+    lines = content.split("\n")
+    body_start, title = 0, ""
+    if lines and lines[0].strip() == "---":
+        end = next((i for i in range(1, len(lines)) if lines[i].strip() == "---"), None)
+        if end is not None:
+            for line in lines[1:end]:
+                m = FRONTMATTER_TITLE_RE.match(line.strip())
+                if m and not title:
+                    title = (m.group(1) or m.group(2)).strip().strip("\"'")
+            body_start = end + 1
+
+    blocks: list[tuple[int, int, str, str]] = []  # (start_line, end_line, section, text)
+    section = ""
+    para: list[tuple[str, int]] = []
+
+    def flush() -> None:
+        if para:
+            text = "\n".join(line for line, _ in para).strip()
+            if len(text) >= MIN_BLOCK_CHARS:
+                blocks.append((para[0][1], para[-1][1], section, text))
+            para.clear()
+
+    for index in range(body_start, len(lines)):
+        raw, line_no = lines[index], index + 1
+        stripped = raw.strip()
+        if stripped.startswith("#"):
+            flush()
+            heading = stripped.lstrip("#").strip()
+            if stripped.startswith("# ") and not title:
+                title = heading
+            elif not stripped.startswith("# "):
+                section = heading
+            continue
+        if not stripped:
+            flush()
+            continue
+        if LIST_ITEM_RE.match(stripped):
+            flush()
+        elif para and raw[:1] not in (" ", "\t") and LIST_ITEM_RE.match(para[0][0].strip()):
+            flush()  # a non-indented line after a list item starts a new paragraph
+        para.append((raw, line_no))
+    flush()
+
+    title = title or fallback_title
+    max_chars = max(32, config.tokens * 4)
+    chunks: list[Chunk] = []
+    for start, end, sec, text in blocks:
+        prefix = " — ".join(part for part in (title, sec) if part)
+        prefix = f"{prefix}\n" if prefix else ""
+        if estimate_string_chars(text) <= max_chars:
+            pieces = [Chunk(0, start, end, text)]
+        else:
+            pieces = [Chunk(0, start + piece.start_line - 1, start + piece.end_line - 1, piece.text)
+                      for piece in chunk_text(text, config)]
+        for piece in pieces:
+            chunks.append(Chunk(len(chunks), piece.start_line, piece.end_line, prefix + piece.text))
+    return chunks
+
+
 def chunk_markdown(path: Path, config: ChunkingConfig) -> list[Chunk]:
-    return chunk_text(read_markdown(path), config)
+    content = read_markdown(path)
+    if config.strategy == "markdown_blocks":
+        return chunk_markdown_blocks(content, config, fallback_title=path.stem)
+    return chunk_text(content, config)
