@@ -283,3 +283,52 @@ def test_lexical_bm25_prefers_stronger_exact_matches_with_and_query(tmp_path: Pa
         assert hits[0].score > hits[1].score
     finally:
         db.close()
+
+
+def test_bedrock_cohere_uses_document_and_query_input_types(monkeypatch: pytest.MonkeyPatch) -> None:
+    from infinite_memory import embeddings
+    from infinite_memory.config import EmbeddingConfig
+
+    calls: list[tuple[str, dict, dict]] = []
+
+    def fake_post(url: str, payload: dict, headers: dict, timeout: float) -> dict:
+        calls.append((url, payload, headers))
+        return {"embeddings": {"float": [[float(i), 1.0] for i, _ in enumerate(payload["texts"])]}}
+
+    monkeypatch.setattr(embeddings, "_post_json", fake_post)
+    monkeypatch.setenv("TEST_BEDROCK_KEY", "secret-token")
+    provider = build_embedding_provider(
+        EmbeddingConfig(
+            provider="bedrock",
+            model="eu.cohere.embed-v4:0",
+            bedrock_region="eu-west-3",
+            bedrock_api_key_env="TEST_BEDROCK_KEY",
+            output_dimension=256,
+        )
+    )
+
+    docs = provider.embed([f"doc {i}" for i in range(100)])
+    query = embeddings.embed_queries(provider, ["question"])
+
+    assert len(docs) == 100 and query == [[0.0, 1.0]]
+    assert [len(c[1]["texts"]) for c in calls] == [96, 4, 1]
+    assert [c[1]["input_type"] for c in calls] == ["search_document", "search_document", "search_query"]
+    assert calls[0][0] == "https://bedrock-runtime.eu-west-3.amazonaws.com/model/eu.cohere.embed-v4%3A0/invoke"
+    assert calls[0][1]["output_dimension"] == 256
+    assert calls[0][2]["Authorization"] == "Bearer secret-token"
+
+
+def test_bedrock_requires_key_region_and_cohere_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    from infinite_memory.config import EmbeddingConfig
+    from infinite_memory.embeddings import EmbeddingConfigError
+
+    monkeypatch.delenv("AWS_BEARER_TOKEN_BEDROCK", raising=False)
+    monkeypatch.delenv("AWS_REGION", raising=False)
+    with pytest.raises(EmbeddingConfigError, match="AWS_BEARER_TOKEN_BEDROCK"):
+        build_embedding_provider(EmbeddingConfig(provider="bedrock", model="cohere.embed-v4:0"))
+
+    monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "x")
+    with pytest.raises(EmbeddingConfigError, match="only supports Cohere"):
+        build_embedding_provider(
+            EmbeddingConfig(provider="bedrock", model="amazon.titan-embed-text-v2:0", bedrock_region="eu-west-3")
+        )

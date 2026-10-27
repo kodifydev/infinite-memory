@@ -8,7 +8,7 @@ import json
 from .chunking import chunk_markdown
 from .config import Config
 from .db import MemoryDB, SearchHit
-from .embeddings import EmbeddingProvider
+from .embeddings import EmbeddingProvider, embed_queries
 
 
 @dataclass(frozen=True)
@@ -122,7 +122,7 @@ class MemoryIndexer:
         self.db.remove_path(path.resolve())
 
     def search(self, query: str, *, max_results: int = 5, min_score: float | None = None) -> list[SearchHit]:
-        query_embedding = self.embedder.embed([query])[0]
+        query_embedding = embed_queries(self.embedder, [query])[0]
         return self.db.search(
             query_embedding,
             query,
