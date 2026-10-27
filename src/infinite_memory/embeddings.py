@@ -79,6 +79,64 @@ class AzureOpenAIEmbeddingProvider:
         return _extract_embeddings(data, len(texts))
 
 
+BEDROCK_COHERE_MAX_TEXTS = 96
+
+
+@dataclass
+class BedrockCohereEmbeddingProvider:
+    """Cohere Embed (v3 / v4) on Amazon Bedrock, authenticated with a Bedrock API key (bearer token).
+
+    Cohere embeds documents and queries asymmetrically: indexed chunks use input_type
+    "search_document" and searches use "search_query", which noticeably improves retrieval.
+    """
+
+    model: str
+    api_key: str
+    region: str
+    output_dimension: int | None = None
+    timeout_seconds: float = 60.0
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        return self._embed(texts, "search_document")
+
+    def embed_queries(self, texts: list[str]) -> list[list[float]]:
+        return self._embed(texts, "search_query")
+
+    def _embed(self, texts: list[str], input_type: str) -> list[list[float]]:
+        model = urllib.parse.quote(self.model, safe="")
+        url = f"https://bedrock-runtime.{self.region}.amazonaws.com/model/{model}/invoke"
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+        vectors: list[list[float]] = []
+        for start in range(0, len(texts), BEDROCK_COHERE_MAX_TEXTS):
+            batch = texts[start : start + BEDROCK_COHERE_MAX_TEXTS]
+            payload: dict = {
+                "texts": batch,
+                "input_type": input_type,
+                "embedding_types": ["float"],
+                "truncate": "END",
+            }
+            if self.output_dimension:
+                payload["output_dimension"] = self.output_dimension
+            data = _post_json(url, payload, headers, self.timeout_seconds)
+            vectors.extend(_extract_cohere_embeddings(data, len(batch)))
+        return vectors
+
+
+def _extract_cohere_embeddings(data: dict, expected_count: int) -> list[list[float]]:
+    embeddings = data.get("embeddings")
+    # embedding_types=["float"] returns {"float": [...]}; older v3 responses return the list directly.
+    vectors = embeddings.get("float") if isinstance(embeddings, dict) else embeddings
+    if not isinstance(vectors, list):
+        raise RuntimeError(f"Embedding response missing embeddings: {list(data.keys())}")
+    if len(vectors) != expected_count or any(not isinstance(v, list) for v in vectors):
+        raise RuntimeError("Embedding response count mismatch")
+    return [[float(x) for x in vector] for vector in vectors]
+
+
 def _post_json(url: str, payload: dict, headers: dict[str, str], timeout_seconds: float) -> dict:
     body = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(url=url, data=body, headers=headers, method="POST")
@@ -146,4 +204,31 @@ def build_embedding_provider(config: EmbeddingConfig) -> EmbeddingProvider:
             timeout_seconds=config.timeout_seconds,
         )
 
+    if provider in {"bedrock", "bedrock_cohere"}:
+        api_key = os.getenv(config.bedrock_api_key_env)
+        region = config.bedrock_region or os.getenv(config.bedrock_region_env)
+        missing = []
+        if not api_key:
+            missing.append(config.bedrock_api_key_env)
+        if not region:
+            missing.append(config.bedrock_region_env)
+        if missing:
+            raise EmbeddingConfigError("Missing env vars: " + ", ".join(missing))
+        # Model IDs, cross-region profiles (eu.cohere.embed-v4:0) and ARNs all contain "cohere.".
+        if "cohere." not in config.model:
+            raise EmbeddingConfigError(f"Bedrock provider only supports Cohere Embed models, got {config.model}")
+        return BedrockCohereEmbeddingProvider(
+            model=config.model,
+            api_key=api_key,
+            region=region,
+            output_dimension=config.output_dimension,
+            timeout_seconds=config.timeout_seconds,
+        )
+
     raise EmbeddingConfigError(f"Unsupported embedding provider: {config.provider}")
+
+
+def embed_queries(embedder: EmbeddingProvider, texts: list[str]) -> list[list[float]]:
+    """Embed search queries, using the provider's query mode when it has one (e.g. Cohere)."""
+    query_embed = getattr(embedder, "embed_queries", None)
+    return query_embed(texts) if callable(query_embed) else embedder.embed(texts)

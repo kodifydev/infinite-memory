@@ -77,6 +77,11 @@ class EmbeddingConfig:
     azure_api_key_env: str = "AZURE_OPENAI_API_KEY"
     azure_deployment_env: str = "AZURE_OPENAI_EMBEDDING_DEPLOYMENT"
     azure_api_version_env: str = "AZURE_OPENAI_API_VERSION"
+    # Amazon Bedrock (Cohere Embed). Auth is a Bedrock API key sent as a bearer token.
+    bedrock_region: str | None = None
+    bedrock_region_env: str = "AWS_REGION"
+    bedrock_api_key_env: str = "AWS_BEARER_TOKEN_BEDROCK"
+    output_dimension: int | None = None
 
 
 @dataclass(frozen=True)
@@ -158,6 +163,12 @@ def load_config(path: str | Path | None = None) -> Config:
             embed_raw.get("azure_deployment_env", "AZURE_OPENAI_EMBEDDING_DEPLOYMENT")
         ),
         azure_api_version_env=str(embed_raw.get("azure_api_version_env", "AZURE_OPENAI_API_VERSION")),
+        bedrock_region=embed_raw.get("bedrock_region"),
+        bedrock_region_env=str(embed_raw.get("bedrock_region_env", "AWS_REGION")),
+        bedrock_api_key_env=str(embed_raw.get("bedrock_api_key_env", "AWS_BEARER_TOKEN_BEDROCK")),
+        output_dimension=(
+            int(embed_raw["output_dimension"]) if embed_raw.get("output_dimension") else None
+        ),
     )
     search = SearchConfig(
         vector_weight=float(search_raw.get("vector_weight", 0.7)),
@@ -197,7 +208,7 @@ def default_config_text(
         "overlap = 80",
         "",
         "[embedding]",
-        '# Use "azure_openai", "openai", or "hash" for offline tests.',
+        '# Use "azure_openai", "openai", "bedrock" (Cohere Embed), or "hash" for offline tests.',
         f"provider = {_toml_string(provider)}",
         f"model = {_toml_string(model)}",
         "batch_size = 32",

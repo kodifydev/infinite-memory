@@ -7,6 +7,7 @@ It supports:
 - Linux-first file watching for `*.md` changes (`watchdog`/inotify, polling fallback).
 - OpenAI embeddings.
 - Azure OpenAI embeddings.
+- Cohere Embed (v3 / v4) on Amazon Bedrock.
 - Deterministic local hash embeddings for tests/offline smoke checks.
 - SQLite storage with OpenClaw-aligned hybrid vector + FTS5 ranking.
 - Optional `sqlite-vec` vector index, with Python cosine fallback when the extension is unavailable.
@@ -172,6 +173,31 @@ Required env var:
 ```bash
 export OPENAI_API_KEY="..."
 ```
+
+For Cohere Embed on Amazon Bedrock:
+
+```toml
+[embedding]
+provider = "bedrock"
+# A model ID or a cross-region inference profile such as "eu.cohere.embed-v4:0".
+model = "eu.cohere.embed-v4:0"
+bedrock_region = "eu-west-3"
+# Optional for Embed v4: 256, 512, 1024 or 1536 (default).
+output_dimension = 1536
+batch_size = 96
+```
+
+Required env var (a [Bedrock API key](https://docs.aws.amazon.com/bedrock/latest/userguide/api-keys.html)):
+
+```bash
+export AWS_BEARER_TOKEN_BEDROCK="..."
+# Optional instead of bedrock_region:
+export AWS_REGION="eu-west-3"
+```
+
+Chunks are embedded with `input_type = "search_document"` and queries with `"search_query"`. Scores are
+not comparable with OpenAI models, so recalibrate `min_score` after switching provider and run
+`infinite-memory index` again: changing the vector dimension rebuilds the vector table.
 
 For offline/dev smoke checks:
 
