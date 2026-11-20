@@ -227,6 +227,23 @@ def test_remote_documents_are_mirrored_indexed_and_searchable(tmp_path: Path, so
         db.close()
 
 
+def test_folder_filled_by_hand_becomes_a_read_only_mirror(tmp_path: Path, source: FakeSource) -> None:
+    mirror = tmp_path / "mirror"
+    (mirror / "area").mkdir(parents=True)
+    existing = mirror / "area" / "note.md"
+    existing.write_text("ya estaba aquí", encoding="utf-8")
+    source.put("d1", "area/note.md", "ya estaba aquí")
+    indexer, db, _ = build(write_config(tmp_path, source))
+    try:
+        stats = indexer.index_all()
+
+        # Nothing to write, but the file can no longer be edited in place.
+        assert stats.sources[0].written == 0
+        assert stat.S_IMODE(existing.stat().st_mode) == 0o444
+    finally:
+        db.close()
+
+
 def test_nothing_changed_is_one_empty_answer_and_no_work(tmp_path: Path, source: FakeSource) -> None:
     source.put("d1", "a.md", "uno dos tres")
     indexer, db, embedder = build(write_config(tmp_path, source))

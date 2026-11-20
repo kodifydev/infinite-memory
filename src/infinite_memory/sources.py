@@ -150,6 +150,10 @@ def _write(root: Path, relative: str, content: str) -> bool:
     data = content.encode("utf-8")
     try:
         if target.read_bytes() == data:
+            # Already there (the folder may have been filled by hand before it became a
+            # mirror): it only has to stop looking editable.
+            if target.stat().st_mode & 0o222:
+                target.chmod(0o444)
             return False
     except OSError:
         pass
