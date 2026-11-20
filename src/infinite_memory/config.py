@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 import json
 import os
 from pathlib import Path
+import re
 import tomllib
 from typing import Any
 
@@ -87,12 +88,35 @@ class SearchConfig:
     candidate_multiplier: int = 4
 
 
+SOURCE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+
+
+@dataclass(frozen=True)
+class SourceConfig:
+    """Documents that live behind an HTTP API and are mirrored here as Markdown files."""
+
+    name: str
+    # Base address; the changes are read from "<url>/changes".
+    url: str
+    # Folder the documents are written to; it is indexed like any watched folder.
+    mirror_path: Path
+    # Environment variable holding the bearer token, if the source needs one.
+    token_env: str | None = None
+    timeout_seconds: float = 20.0
+    page_size: int = 100
+    # Do not ask the source again when it was asked less than this ago (0 = always ask).
+    min_interval_seconds: float = 0.0
+    # How often `watch` asks the source.
+    poll_interval_seconds: float = 30.0
+
+
 @dataclass(frozen=True)
 class Config:
     watch: WatchConfig
     chunking: ChunkingConfig = field(default_factory=ChunkingConfig)
     embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
     search: SearchConfig = field(default_factory=SearchConfig)
+    sources: list[SourceConfig] = field(default_factory=list)
 
 
 def _as_list(value: Any, default: list[str]) -> list[str]:
@@ -122,8 +146,9 @@ def load_config(path: str | Path | None = None) -> Config:
     search_raw = raw.get("search", {})
 
     paths = [expand_path(p) for p in _as_list(watch_raw.get("paths"), [])]
-    if not paths:
-        raise ValueError("Config [watch].paths must include at least one folder")
+    sources_raw = raw.get("sources", [])
+    if not paths and not sources_raw:
+        raise ValueError("Config needs a folder in [watch].paths or a remote [[sources]] entry")
 
     watch = WatchConfig(
         paths=paths,
@@ -165,7 +190,39 @@ def load_config(path: str | Path | None = None) -> Config:
         min_score=float(search_raw.get("min_score", 0.35)),
         candidate_multiplier=max(1, int(search_raw.get("candidate_multiplier", 4))),
     )
-    return Config(watch=watch, chunking=chunking, embedding=embedding, search=search)
+    sources = _load_sources(sources_raw, watch.db_path)
+    return Config(watch=watch, chunking=chunking, embedding=embedding, search=search, sources=sources)
+
+
+def _load_sources(raw: Any, db_path: Path) -> list[SourceConfig]:
+    if not isinstance(raw, list):
+        raise ValueError("Config sources must be written as [[sources]] tables")
+    sources: list[SourceConfig] = []
+    for entry in raw:
+        name = str(entry.get("name", ""))
+        if not SOURCE_NAME_RE.match(name):
+            raise ValueError(
+                "Each [[sources]] entry needs a name of lowercase letters, numbers, - or _"
+            )
+        if any(source.name == name for source in sources):
+            raise ValueError(f"Source name used twice: {name}")
+        url = str(entry.get("url", "")).rstrip("/")
+        if not url.startswith(("http://", "https://")):
+            raise ValueError(f"Source {name} needs an http(s) url")
+        mirror = entry.get("mirror_path")
+        sources.append(
+            SourceConfig(
+                name=name,
+                url=url,
+                mirror_path=expand_path(mirror) if mirror else db_path.parent / "sources" / name,
+                token_env=entry.get("token_env") or None,
+                timeout_seconds=float(entry.get("timeout_seconds", 20.0)),
+                page_size=max(1, int(entry.get("page_size", 100))),
+                min_interval_seconds=max(0.0, float(entry.get("min_interval_seconds", 0.0))),
+                poll_interval_seconds=max(1.0, float(entry.get("poll_interval_seconds", 30.0))),
+            )
+        )
+    return sources
 
 
 def _toml_string(value: str | Path) -> str:

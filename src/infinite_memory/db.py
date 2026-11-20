@@ -84,6 +84,12 @@ class MemoryDB:
                 path UNINDEXED
             );
             CREATE INDEX IF NOT EXISTS idx_chunks_path ON chunks(path);
+            CREATE TABLE IF NOT EXISTS source_documents (
+                source TEXT NOT NULL,
+                doc_id TEXT NOT NULL,
+                path TEXT NOT NULL,
+                PRIMARY KEY (source, doc_id)
+            );
             """
         )
         self.conn.commit()
@@ -161,6 +167,32 @@ class MemoryDB:
 
     def indexed_file(self, path: Path) -> sqlite3.Row | None:
         return self.conn.execute("SELECT * FROM files WHERE path = ?", (str(path),)).fetchone()
+
+    def chunk_embeddings(self, path: Path) -> dict[str, str]:
+        """Stored embedding (still as JSON) of each chunk of a file, by the chunk's text."""
+        rows = self.conn.execute("SELECT text, embedding FROM chunks WHERE path = ?", (str(path),))
+        return {row["text"]: row["embedding"] for row in rows}
+
+    def source_documents(self, source: str) -> dict[str, str]:
+        """Mirror path (relative to the source's folder) of each remote document, by its id."""
+        rows = self.conn.execute(
+            "SELECT doc_id, path FROM source_documents WHERE source = ?", (source,)
+        )
+        return {row["doc_id"]: row["path"] for row in rows}
+
+    def set_source_document(self, source: str, doc_id: str, path: str) -> None:
+        self.conn.execute(
+            "INSERT INTO source_documents(source, doc_id, path) VALUES (?, ?, ?) "
+            "ON CONFLICT(source, doc_id) DO UPDATE SET path=excluded.path",
+            (source, doc_id, path),
+        )
+        self.conn.commit()
+
+    def remove_source_document(self, source: str, doc_id: str) -> None:
+        self.conn.execute(
+            "DELETE FROM source_documents WHERE source = ? AND doc_id = ?", (source, doc_id)
+        )
+        self.conn.commit()
 
     def upsert_file(
         self,
