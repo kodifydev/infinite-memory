@@ -34,13 +34,17 @@ class MemoryIndexer:
         self.embedded_chunks = 0
 
     def index_signature(self) -> str:
+        chunking: dict[str, int | str] = {
+            "tokens": self.config.chunking.tokens,
+            "overlap": self.config.chunking.overlap,
+        }
+        # "window" is how every index was built before strategies existed: naming it
+        # would make those indexes look stale and embed everything again for nothing.
+        if self.config.chunking.strategy != "window":
+            chunking["strategy"] = self.config.chunking.strategy
         return json.dumps(
             {
-                "chunking": {
-                    "tokens": self.config.chunking.tokens,
-                    "overlap": self.config.chunking.overlap,
-                    "strategy": self.config.chunking.strategy,
-                },
+                "chunking": chunking,
                 "embedding": {
                     "provider": self.config.embedding.provider,
                     "model": self.config.embedding.model,

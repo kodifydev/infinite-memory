@@ -187,6 +187,27 @@ def test_file_that_grows_only_embeds_its_new_chunks(tmp_path: Path) -> None:
         db.close()
 
 
+def test_index_built_before_chunking_strategies_is_not_embedded_again(tmp_path: Path) -> None:
+    notes = tmp_path / "notes"
+    notes.mkdir()
+    (notes / "note.md").write_text("alpha beta gamma delta " * 80, encoding="utf-8")
+    indexer, db, embedder = build(write_config(tmp_path, notes=notes))
+    try:
+        indexer.index_all()
+        # What an index made by a version without strategies has stored.
+        db.set_meta(
+            MemoryIndexer.INDEX_SIGNATURE_KEY,
+            '{"chunking":{"overlap":8,"tokens":40},"embedding":{"dimension":64,"model":"text-embedding-3-large","provider":"hash"}}',
+        )
+        embedder.texts.clear()
+
+        stats = indexer.index_all()
+
+        assert (stats.indexed, stats.embedded, embedder.texts) == (0, 0, [])
+    finally:
+        db.close()
+
+
 def test_forced_index_embeds_everything_again(tmp_path: Path) -> None:
     notes = tmp_path / "notes"
     notes.mkdir()
