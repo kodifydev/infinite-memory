@@ -9,6 +9,7 @@ from .chunking import chunk_markdown
 from .config import Config
 from .db import MemoryDB, SearchHit
 from .embeddings import EmbeddingProvider
+from .sources import SourceSyncResult, sync_source
 
 
 @dataclass(frozen=True)
@@ -18,6 +19,9 @@ class IndexStats:
     skipped: int = 0
     removed: int = 0
     chunks: int = 0
+    # Chunks whose embedding had to be computed; the rest of `chunks` were reused.
+    embedded: int = 0
+    sources: tuple[SourceSyncResult, ...] = ()
 
 
 class MemoryIndexer:
@@ -27,6 +31,7 @@ class MemoryIndexer:
         self.config = config
         self.db = db
         self.embedder = embedder
+        self.embedded_chunks = 0
 
     def index_signature(self) -> str:
         return json.dumps(
@@ -49,7 +54,8 @@ class MemoryIndexer:
     def iter_markdown_files(self) -> list[Path]:
         files: set[Path] = set()
         excludes = set(self.config.watch.exclude_dirs)
-        for root in self.config.watch.paths:
+        roots = [*self.config.watch.paths, *(source.mirror_path for source in self.config.sources)]
+        for root in roots:
             if root.is_file() and root.suffix.lower() == ".md":
                 files.add(root.resolve())
                 continue
@@ -64,8 +70,16 @@ class MemoryIndexer:
                     files.add(path.resolve())
         return sorted(files)
 
+    def sync_sources(self) -> tuple[SourceSyncResult, ...]:
+        """Bring every remote source's mirror folder up to date; a failing one is reported."""
+        return tuple(sync_source(source, self.db) for source in self.config.sources)
+
     def index_all(self, *, force: bool = False) -> IndexStats:
         scanned = indexed = skipped = chunks = 0
+        embedded_before = self.embedded_chunks
+        # First, so that what changed in a remote source is indexed in this same pass. A
+        # source that cannot be reached keeps its mirrored files, so nothing is pruned.
+        sources = self.sync_sources()
         signature = self.index_signature()
         effective_force = force or self.db.get_meta(self.INDEX_SIGNATURE_KEY) != signature
         paths = self.iter_markdown_files()
@@ -79,7 +93,10 @@ class MemoryIndexer:
                 skipped += 1
         removed = self.db.prune_missing({str(p) for p in paths})
         self.db.set_meta(self.INDEX_SIGNATURE_KEY, signature)
-        return IndexStats(scanned=scanned, indexed=indexed, skipped=skipped, removed=removed, chunks=chunks)
+        return IndexStats(
+            scanned=scanned, indexed=indexed, skipped=skipped, removed=removed, chunks=chunks,
+            embedded=self.embedded_chunks - embedded_before, sources=sources,
+        )
 
     def index_file(self, path: Path, *, force: bool = False) -> tuple[bool, int]:
         path = path.resolve()
@@ -100,10 +117,20 @@ class MemoryIndexer:
 
         chunks = chunk_markdown(path, self.config.chunking)
         texts = [chunk.text for chunk in chunks]
-        embeddings: list[list[float]] = []
+        # A file that grew or changed in one place keeps most of its chunks word for word:
+        # those keep their embedding. A forced index (new model or chunking) computes all.
+        known = {} if force else self.db.chunk_embeddings(path)
+        embeddings: list[list[float] | None] = [
+            json.loads(known[text]) if text in known else None for text in texts
+        ]
+        missing = [index for index, embedding in enumerate(embeddings) if embedding is None]
         batch_size = max(1, self.config.embedding.batch_size)
-        for start in range(0, len(texts), batch_size):
-            embeddings.extend(self.embedder.embed(texts[start : start + batch_size]))
+        for start in range(0, len(missing), batch_size):
+            batch = missing[start : start + batch_size]
+            computed = self.embedder.embed([texts[index] for index in batch])
+            for index, embedding in zip(batch, computed, strict=True):
+                embeddings[index] = embedding
+        self.embedded_chunks += len(missing)
 
         rows = [
             (chunk.index, chunk.start_line, chunk.end_line, chunk.text, embedding)

@@ -8,6 +8,7 @@ from .config import default_config_text, load_config, resolve_config_path
 from .db import MemoryDB
 from .embeddings import build_embedding_provider
 from .indexer import MemoryIndexer
+from .sources import synced_at_key
 from .watcher import watch
 
 
@@ -52,6 +53,8 @@ def cmd_index(args: argparse.Namespace) -> int:
                     "skipped": stats.skipped,
                     "removed": stats.removed,
                     "chunks": stats.chunks,
+                    "embedded": stats.embedded,
+                    "sources": [_source_result(result) for result in stats.sources],
                     "db_path": str(indexer.config.watch.db_path),
                 },
                 ensure_ascii=False,
@@ -60,6 +63,15 @@ def cmd_index(args: argparse.Namespace) -> int:
         return 0
     finally:
         db.close()
+
+
+def _source_result(result) -> dict:
+    payload = {"name": result.name, "ok": result.ok, "written": result.written, "removed": result.removed}
+    if result.skipped:
+        payload["skipped"] = True
+    if result.error:
+        payload["error"] = result.error
+    return payload
 
 
 def cmd_search(args: argparse.Namespace) -> int:
@@ -95,6 +107,16 @@ def cmd_status(args: argparse.Namespace) -> int:
                     "files": db.count_files(),
                     "chunks": db.count_chunks(),
                     "paths": [str(p) for p in config.watch.paths],
+                    "sources": [
+                        {
+                            "name": source.name,
+                            "url": source.url,
+                            "mirror_path": str(source.mirror_path),
+                            "documents": len(db.source_documents(source.name)),
+                            "synced_at": db.get_meta(synced_at_key(source.name)),
+                        }
+                        for source in config.sources
+                    ],
                     "embedding_provider": config.embedding.provider,
                     "embedding_model": config.embedding.model,
                     "vector_backend": db.vector_backend,

@@ -70,13 +70,17 @@ def watch(indexer: MemoryIndexer) -> None:
                 handler.mark(event.src_path)
 
     observer = Observer()
-    for root in indexer.config.watch.paths:
+    roots = [*indexer.config.watch.paths, *(source.mirror_path for source in indexer.config.sources)]
+    for root in dict.fromkeys(roots):
         if root.exists():
             observer.schedule(_Handler(), str(root), recursive=True)
     observer.start()
     print("watching markdown changes; press Ctrl+C to stop", flush=True)
+    sources = _SourcePoller(indexer)
     try:
         while True:
+            # What a source changed lands in its mirror folder, and the observer sees it there.
+            sources.poll_if_due()
             handler.process_ready()
             time.sleep(0.2)
     except KeyboardInterrupt:
@@ -84,13 +88,35 @@ def watch(indexer: MemoryIndexer) -> None:
     observer.join()
 
 
+class _SourcePoller:
+    """Asks the remote sources again every so often while watching."""
+
+    def __init__(self, indexer: MemoryIndexer):
+        self.indexer = indexer
+        intervals = [source.poll_interval_seconds for source in indexer.config.sources]
+        self.interval = min(intervals) if intervals else None
+        self.next_poll = time.time() + (self.interval or 0)
+
+    def poll_if_due(self) -> None:
+        if self.interval is None or time.time() < self.next_poll:
+            return
+        self.next_poll = time.time() + self.interval
+        for result in self.indexer.sync_sources():
+            if not result.ok:
+                print(f"source {result.name} failed: {result.error}", flush=True)
+            elif result.written or result.removed:
+                print(f"source {result.name}: {result.written} written, {result.removed} removed", flush=True)
+
+
 def _poll_watch(indexer: MemoryIndexer) -> None:
     print("watchdog unavailable; falling back to polling", flush=True)
     indexer.index_all(force=False)
     known = {str(path): path.stat().st_mtime_ns for path in indexer.iter_markdown_files() if path.exists()}
+    sources = _SourcePoller(indexer)
     try:
         while True:
             time.sleep(indexer.config.watch.poll_interval_seconds)
+            sources.poll_if_due()
             current_paths = indexer.iter_markdown_files()
             current = {str(path): path.stat().st_mtime_ns for path in current_paths if path.exists()}
             for path_str, mtime in current.items():
