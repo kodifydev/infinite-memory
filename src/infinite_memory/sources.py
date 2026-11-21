@@ -18,6 +18,8 @@ from dataclasses import dataclass
 import json
 import os
 from pathlib import Path, PurePosixPath
+import shlex
+import subprocess
 import time
 import urllib.error
 import urllib.parse
@@ -75,6 +77,29 @@ def synced_at_key(name: str) -> str:
     return f"source_synced_at:{name}"
 
 
+def source_token(source: SourceConfig) -> str | None:
+    """Bearer token of a source, from its variable or by running its command."""
+    if source.token_env:
+        token = os.getenv(source.token_env)
+        if not token:
+            raise SourceError(f"environment variable {source.token_env} is not set")
+        return token
+    if source.token_command:
+        try:
+            result = subprocess.run(
+                shlex.split(source.token_command), capture_output=True, text=True,
+                timeout=source.timeout_seconds,
+            )
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            raise SourceError(f"token_command failed: {exc}") from None
+        token = result.stdout.strip()
+        if result.returncode != 0 or not token:
+            # Never the output: a command that half-worked may have printed a secret.
+            raise SourceError(f"token_command failed with exit code {result.returncode}")
+        return token
+    return None
+
+
 def fetch_changes(source: SourceConfig, cursor: str | None) -> ChangesPage:
     query = {"limit": str(source.page_size)}
     if cursor is not None:
@@ -83,10 +108,8 @@ def fetch_changes(source: SourceConfig, cursor: str | None) -> ChangesPage:
         f"{source.url}/changes?{urllib.parse.urlencode(query)}",
         headers={"Accept": "application/json"},
     )
-    if source.token_env:
-        token = os.getenv(source.token_env)
-        if not token:
-            raise SourceError(f"environment variable {source.token_env} is not set")
+    token = source_token(source)
+    if token:
         request.add_header("Authorization", f"Bearer {token}")
     try:
         with urllib.request.urlopen(request, timeout=source.timeout_seconds) as response:

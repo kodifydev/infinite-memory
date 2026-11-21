@@ -102,6 +102,8 @@ class SourceConfig:
     mirror_path: Path
     # Environment variable holding the bearer token, if the source needs one.
     token_env: str | None = None
+    # Or a command that prints the token, for sources whose tokens are short-lived.
+    token_command: str | None = None
     timeout_seconds: float = 20.0
     page_size: int = 100
     # Do not ask the source again when it was asked less than this ago (0 = always ask).
@@ -209,6 +211,8 @@ def _load_sources(raw: Any, db_path: Path) -> list[SourceConfig]:
         url = str(entry.get("url", "")).rstrip("/")
         if not url.startswith(("http://", "https://")):
             raise ValueError(f"Source {name} needs an http(s) url")
+        if entry.get("token_env") and entry.get("token_command"):
+            raise ValueError(f"Source {name}: set token_env or token_command, not both")
         mirror = entry.get("mirror_path")
         sources.append(
             SourceConfig(
@@ -216,6 +220,7 @@ def _load_sources(raw: Any, db_path: Path) -> list[SourceConfig]:
                 url=url,
                 mirror_path=expand_path(mirror) if mirror else db_path.parent / "sources" / name,
                 token_env=entry.get("token_env") or None,
+                token_command=entry.get("token_command") or None,
                 timeout_seconds=float(entry.get("timeout_seconds", 20.0)),
                 page_size=max(1, int(entry.get("page_size", 100))),
                 min_interval_seconds=max(0.0, float(entry.get("min_interval_seconds", 0.0))),

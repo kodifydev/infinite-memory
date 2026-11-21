@@ -4,6 +4,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
 import stat
+import sys
 import threading
 from urllib.parse import parse_qs, urlsplit
 
@@ -350,6 +351,28 @@ def test_min_interval_skips_asking_too_often(tmp_path: Path, source: FakeSource)
         db.close()
 
 
+def test_token_can_come_from_a_command(tmp_path: Path, source: FakeSource, monkeypatch) -> None:
+    monkeypatch.delenv("TEST_SOURCE_TOKEN")
+    source.put("d1", "a.md", "uno")
+    config = write_config(tmp_path, source)
+    printer = tmp_path / "token.py"
+    printer.write_text(f"print({TOKEN!r})", encoding="utf-8")
+    text = config.read_text(encoding="utf-8")
+    config.write_text(
+        text.replace('token_env = "TEST_SOURCE_TOKEN"', f"token_command = {json.dumps(f'{sys.executable} {printer}')}"),
+        encoding="utf-8",
+    )
+    indexer, db, _ = build(config)
+    try:
+        assert indexer.index_all().sources[0].written == 1
+
+        printer.write_text("import sys; print('half a secret'); sys.exit(3)", encoding="utf-8")
+        failed = indexer.index_all().sources[0]
+        assert not failed.ok and failed.error == "token_command failed with exit code 3"
+    finally:
+        db.close()
+
+
 def test_missing_token_is_reported_not_raised(tmp_path: Path, source: FakeSource, monkeypatch) -> None:
     monkeypatch.delenv("TEST_SOURCE_TOKEN")
     indexer, db, _ = build(write_config(tmp_path, source))
@@ -424,4 +447,10 @@ def test_config_refuses_sources_it_cannot_use(tmp_path: Path) -> None:
         load_config(config)
     config.write_text("[watch]\npaths = []\n", encoding="utf-8")
     with pytest.raises(ValueError, match="sources"):
+        load_config(config)
+    config.write_text(
+        '[watch]\npaths = []\n\n[[sources]]\nname = "ok"\nurl = "http://x"\ntoken_env = "A"\ntoken_command = "b"\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="not both"):
         load_config(config)

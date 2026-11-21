@@ -138,6 +138,7 @@ keep pointing at a file and a line range.
 name = "wiki"
 url = "https://example.com/api/memory"      # changes are read from <url>/changes
 token_env = "INFINITE_MEMORY_WIKI_TOKEN"     # bearer token, read from the environment
+# token_command = "/path/to/print-token"     # or a command that prints it (short-lived tokens)
 mirror_path = "~/memories/wiki"              # default: <index folder>/sources/<name>
 # page_size = 100
 # min_interval_seconds = 0                   # do not ask again sooner than this
